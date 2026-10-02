@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
+from math import pi
 
 
 class LeaderNode(Node):
@@ -11,14 +12,16 @@ class LeaderNode(Node):
         super().__init__("leader_node")
 
         self.declare_parameter("port", "")
+        self.declare_parameter("calibration_file", "")
         self.declare_parameter("joint_states", "/joint_states")
 
         port = self.get_parameter("port").get_parameter_value().string_value
+        calibration_file = self.get_parameter("calibration_file").get_parameter_value().string_value
         joint_states = (
             self.get_parameter("joint_states").get_parameter_value().string_value
         )
 
-        self.leader_arm = LeaderArm(port=port)
+        self.leader_arm = LeaderArm(port=port, calibration_file=calibration_file)
         self.get_logger().info("Connect the leader arm.")
         self.leader_arm.connect()
 
@@ -28,7 +31,7 @@ class LeaderNode(Node):
 
     def timer_callback(self):
         positions = self.leader_arm.read_present_position()
-        positions = {k: (v - 2048) * (2 * 3.14) / 4096 for k, v in positions.items()}
+        positions = {k: (v - 2048) * (2 * pi) / 4096 for k, v in positions.items()}
 
         msg = JointState()
         msg.header = Header()
