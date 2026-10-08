@@ -1,20 +1,11 @@
 from .arm.FollowerArm import FollowerArm
+from .joint_calibration import JointCalibration, LIMITS
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
-# URDF limits for the physical SO-101.  LeRobot calibration supplies the
-# encoder endpoints; mapping those endpoints onto these ROS joint limits keeps
-# MoveIt's joint convention and the follower's physical convention identical.
-JOINT_LIMITS = {
-    "shoulder_pan": (-1.91986, 1.91986),
-    "shoulder_lift": (-1.74533, 1.74533),
-    "elbow_flex": (-1.69, 1.69),
-    "wrist_flex": (-1.65806, 1.65806),
-    "wrist_roll": (-2.74385, 2.84121),
-    "gripper": (-0.174533, 1.74533),
-}
+JOINT_LIMITS = LIMITS
 
 
 class FollowerNode(Node):
@@ -23,12 +14,19 @@ class FollowerNode(Node):
 
         self.declare_parameter("port", "")
         self.declare_parameter("calibration_file", "")
+        self.declare_parameter("joint_calibration_file", "")
+        self.declare_parameter("read_only", True)
         self.declare_parameter("joint_states", "/joint_states")
         self.declare_parameter("joint_commands", "/joint_commands")
         self.declare_parameter("state_publish_rate", 50.0)
 
         port = self.get_parameter("port").get_parameter_value().string_value
         calibration_file = self.get_parameter("calibration_file").get_parameter_value().string_value
+        self.joint_calibration = JointCalibration.load(
+            self.get_parameter("joint_calibration_file").value, calibration_file)
+        self.read_only = self.get_parameter("read_only").value
+        if not self.read_only and not self.joint_calibration.directions_verified:
+            raise ValueError('Single-pose calibration has unverified directions. Use read_only:=true; motor connection refused.')
         joint_states = (
             self.get_parameter("joint_states").get_parameter_value().string_value
         )
@@ -41,7 +39,7 @@ class FollowerNode(Node):
 
         self.follower_arm = FollowerArm(port=port, calibration_file=calibration_file)
         self.get_logger().info("Connect the follower arm.")
-        self.follower_arm.connect()
+        self.follower_arm.connect(read_only=self.read_only)
 
         self.get_logger().info(f"Create publisher topic. {joint_states}")
         self.pub_joint_states = self.create_publisher(JointState, joint_states, 10)
@@ -70,36 +68,29 @@ class FollowerNode(Node):
         self.pub_joint_states.publish(msg)
 
     def joint_commands_callback(self, msg):
+        if self.read_only:
+            return
+        if len(msg.name) != len(msg.position) or len(set(msg.name)) != len(msg.name):
+            self.get_logger().error('Malformed joint command rejected')
+            return
         positions = dict(zip(msg.name, msg.position))
-        positions = {
-            name: self.ros_to_encoder(name, value)
-            for name, value in positions.items()
-            if name in JOINT_LIMITS
-        }
+        try:
+            positions = {
+                name: self.ros_to_encoder(name, value)
+                for name, value in positions.items()
+                if name in JOINT_LIMITS
+            }
+        except ValueError as error:
+            self.get_logger().error(str(error))
+            return
 
         self.follower_arm.write_goal_position(positions)
 
     def encoder_to_ros(self, name, encoder_position):
-        calibration = self.follower_arm.calibration[name]
-        lower, upper = JOINT_LIMITS[name]
-        ratio = (encoder_position - calibration.range_min) / (
-            calibration.range_max - calibration.range_min
-        )
-        if calibration.drive_mode:
-            ratio = 1.0 - ratio
-        ratio = min(1.0, max(0.0, ratio))
-        return lower + ratio * (upper - lower)
+        return self.joint_calibration.to_ros(name, encoder_position)
 
     def ros_to_encoder(self, name, ros_position):
-        calibration = self.follower_arm.calibration[name]
-        lower, upper = JOINT_LIMITS[name]
-        ratio = (ros_position - lower) / (upper - lower)
-        if calibration.drive_mode:
-            ratio = 1.0 - ratio
-        ratio = min(1.0, max(0.0, ratio))
-        return round(
-            calibration.range_min + ratio * (calibration.range_max - calibration.range_min)
-        )
+        return self.joint_calibration.to_encoder(name, ros_position)
 
 
 def main(args=None):

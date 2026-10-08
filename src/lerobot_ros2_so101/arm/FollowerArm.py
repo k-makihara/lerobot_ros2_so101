@@ -23,7 +23,8 @@ class FollowerArm:
         ):
             self.calibration = draccus.load(dict[str, MotorCalibration], f)
 
-    def connect(self) -> None:
+    def connect(self, read_only=False) -> None:
+        self.read_only = read_only
         self.bus = FeetechMotorsBus(
             port=self.port,
             motors={
@@ -38,6 +39,14 @@ class FollowerArm:
         )
 
         self.bus.connect()
+        if read_only:
+            actual = self.bus.read_calibration()
+            for name, expected in self.calibration.items():
+                for field in ('id', 'homing_offset', 'range_min', 'range_max'):
+                    if getattr(actual[name], field) != getattr(expected, field):
+                        self.bus.disconnect(disable_torque=False)
+                        raise ValueError(f'{name}: motor calibration differs from file ({field})')
+            return  # No torque, EEPROM, operating-mode or goal writes.
 
         # SO101Follower.configure()
         with self.bus.torque_disabled():
@@ -51,11 +60,17 @@ class FollowerArm:
                 self.bus.write("P_Coefficient", motor, 16)
                 self.bus.write("I_Coefficient", motor, 0)
                 self.bus.write("D_Coefficient", motor, 32)
+            # Hold the measured pose when torque is re-enabled, not a stale goal.
+            positions = self.bus.sync_read("Present_Position", normalize=False)
+            for motor, value in positions.items():
+                self.bus.write("Goal_Position", motor, value, normalize=False)
 
     def read_present_position(self) -> dict[str, float]:
         return self.bus.sync_read("Present_Position", normalize=False)
 
     def write_goal_position(self, positions) -> None:
+        if self.read_only:
+            raise RuntimeError('Motor commands are disabled in read-only mode')
         missing = [k for k in positions if k not in self.bus.motors]
         if missing:
             print(f"WARNING: motors not defined. {missing}")
